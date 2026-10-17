@@ -1,884 +1,419 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import Papa from 'papaparse';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, Legend,
-  AreaChart, Area,
-  LineChart, Line,
-  Treemap,
-  RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
-} from 'recharts';
+  EMPTY_FILTERS, FILTER_LABELS, SEVERITY_LABELS,
+  toRecord, applyFilters, tally, summarize, pct, fmt,
+} from './data.js';
+import { THEME_COLORS, Card, StackedBars, YearColumns, RateBars } from './charts.jsx';
+import IncidentTable from './IncidentTable.jsx';
 
-/* ─── Color Palette ────────────────────────────────────────── */
-const COLORS = [
-  '#4f7df5', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b',
-  '#00d4ff', '#f97316', '#14b8a6', '#6366f1', '#ef4444',
-  '#a855f7', '#22d3ee', '#84cc16', '#e879f9', '#fb923c',
-];
+const REPO_URL = 'https://github.com/kashifshafi99/alberta-pipeline-risk-ml';
+const DATA_URL = 'https://open.canada.ca/data/en/dataset/fd17f08f-f14d-433f-91df-c90a34e1e9a6';
 
-const PROVINCE_COLORS = {
-  'Alberta': '#4f7df5',
-  'British Columbia': '#8b5cf6',
-  'Ontario': '#ec4899',
-  'Saskatchewan': '#10b981',
-  'New Brunswick': '#f59e0b',
-  'Manitoba': '#00d4ff',
-  'Quebec': '#f97316',
-  'Nova Scotia': '#14b8a6',
-  'Northwest Territories': '#6366f1',
-};
-
-const INCIDENT_TYPE_MAP = {
-  'Release of Substance': { color: '#4f7df5', shortName: 'Release' },
-  'Operation Beyond Design Limits': { color: '#f59e0b', shortName: 'OBDL' },
-  'Fire': { color: '#f97316', shortName: 'Fire' },
-  'Serious Injury (as defined in the OPR)': { color: '#8b5cf6', shortName: 'Injury' },
-  'Adverse Environmental Effects': { color: '#10b981', shortName: 'Adverse Env.' },
-  'Explosion': { color: '#ef4444', shortName: 'Explosion' },
-  'Fatality': { color: '#ff6b6b', shortName: 'Fatality' },
-};
-
-/* ─── Helpers ──────────────────────────────────────────────── */
-function getPrimaryIncidentType(types) {
-  if (!types) return 'Other';
-  const primary = types.split(',')[0].trim();
-  for (const key of Object.keys(INCIDENT_TYPE_MAP)) {
-    if (primary.includes(key) || types.includes(key)) return key;
-  }
-  return 'Other';
+/* ─── small hooks ──────────────────────────────────────────── */
+function useWidth() {
+  const [w, setW] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const on = () => setW(window.innerWidth);
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
+  }, []);
+  return w;
 }
 
-function getTypeBadgeClass(type) {
-  if (type.includes('Release')) return 'type-badge-release';
-  if (type.includes('Fire') && !type.includes('Fatality')) return 'type-badge-fire';
-  if (type.includes('Explosion')) return 'type-badge-explosion';
-  if (type.includes('Injury')) return 'type-badge-injury';
-  if (type.includes('Operation Beyond')) return 'type-badge-obdl';
-  if (type.includes('Adverse')) return 'type-badge-adverse';
-  if (type.includes('Fatality')) return 'type-badge-fatality';
-  return 'type-badge-default';
+function initialTheme() {
+  try {
+    const saved = localStorage.getItem('pid-theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch { /* storage unavailable */ }
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
-function formatNumber(num) {
-  if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
-  if (num >= 1_000) return (num / 1_000).toFixed(1) + 'K';
-  return num.toLocaleString();
+function readHash() {
+  const p = new URLSearchParams(window.location.hash.slice(1));
+  const f = { ...EMPTY_FILTERS };
+  for (const k of Object.keys(EMPTY_FILTERS)) if (p.get(k)) f[k] = p.get(k);
+  return f;
 }
 
-/* ─── Custom Tooltip ───────────────────────────────────────── */
-function CustomTooltip({ active, payload, label }) {
-  if (!active || !payload?.length) return null;
+const dateFmt = new Intl.DateTimeFormat('en-CA', { day: 'numeric', month: 'short', year: 'numeric' });
+
+/* ═══════════════════════════════════════════════════════════ */
+export default function App() {
+  const [records, setRecords] = useState([]);
+  const [status, setStatus] = useState('loading');
+  const [filters, setFilters] = useState(readHash);
+  const [theme, setTheme] = useState(initialTheme);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const width = useWidth();
+  const compact = width < 760;
+  const colors = THEME_COLORS[theme];
+
+  /* load data */
+  useEffect(() => {
+    fetch(`${import.meta.env.BASE_URL}pipeline-incidents-comprehensive-data.csv`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      })
+      .then((text) => {
+        const { data } = Papa.parse(text, { header: true, skipEmptyLines: true });
+        setRecords(data.map(toRecord));
+        setStatus('ready');
+      })
+      .catch(() => setStatus('error'));
+  }, []);
+
+  /* theme */
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try { localStorage.setItem('pid-theme', theme); } catch { /* ignore */ }
+  }, [theme]);
+
+  /* keep filters in the URL so a view can be shared */
+  useEffect(() => {
+    const p = new URLSearchParams();
+    Object.entries(filters).forEach(([k, v]) => v && p.set(k, v));
+    const h = p.toString();
+    window.history.replaceState(null, '', h ? `#${h}` : window.location.pathname + window.location.search);
+  }, [filters]);
+
+  const setFilter = useCallback((key, value) => setFilters((f) => ({ ...f, [key]: value })), []);
+  const toggle = useCallback((key) => (value) => setFilters((f) => ({ ...f, [key]: f[key] === value ? '' : value })), []);
+  const clearAll = useCallback(() => setFilters({ ...EMPTY_FILTERS }), []);
+
+  /* data coverage */
+  const meta = useMemo(() => {
+    if (!records.length) return null;
+    const maxTime = Math.max(...records.map((r) => r.time));
+    const minYear = Math.min(...records.map((r) => r.year));
+    const maxDate = new Date(maxTime);
+    const maxYear = maxDate.getFullYear();
+    const partialYear = maxDate.getMonth() < 11 ? maxYear : null;
+    const years = [];
+    for (let y = minYear; y <= maxYear; y += 1) years.push(String(y));
+    return { maxDate, minYear, maxYear, partialYear, years };
+  }, [records]);
+
+  const options = useMemo(() => {
+    const uniq = (fn, multi) => [...new Set(records.flatMap((r) => (multi ? fn(r) : [fn(r)])).filter(Boolean))].sort();
+    return {
+      province: uniq((r) => r.province),
+      type: uniq((r) => r.types, true),
+      operator: uniq((r) => r.operator),
+      what: uniq((r) => r.what, true),
+      activity: uniq((r) => r.activity),
+    };
+  }, [records]);
+
+  const filtered = useMemo(() => applyFilters(records, filters), [records, filters]);
+  const kpi = useMemo(() => summarize(filtered), [filtered]);
+
+  /* each chart ignores its own filter, so the selection is shown in context */
+  const view = useMemo(() => {
+    const ex = (...keys) => applyFilters(records, filters, keys);
+    const byYear = new Map(tally(ex('yearFrom', 'yearTo'), (r) => r.year).map((d) => [d.name, d]));
+    const years = (meta?.years || []).map((y) => byYear.get(y) || { name: y, total: 0, sig: 0, other: 0, rate: 0 });
+    const activity = tally(ex('activity'), (r) => r.activity).filter((d) => d.total >= 5).sort((a, b) => b.rate - a.rate);
+    return {
+      years,
+      type: tally(ex('type'), (r) => r.types, true),
+      province: tally(ex('province'), (r) => r.province),
+      operator: tally(ex('operator'), (r) => r.operator).slice(0, 10),
+      what: tally(ex('what'), (r) => r.what, true),
+      why: tally(ex('why'), (r) => r.why, true),
+      activity,
+      activityBase: summarize(ex('activity')).rate,
+      substance: tally(ex('substance'), (r) => r.substance).slice(0, 8),
+      landUse: tally(ex('landUse'), (r) => r.landUse),
+      landKnown: ex('landUse').filter((r) => r.landUse).length,
+      landBase: ex('landUse').length,
+    };
+  }, [records, filters, meta]);
+
+  /* plain-language findings for the current selection */
+  const insights = useMemo(() => {
+    const out = [];
+    if (filtered.length < 10) return out;
+    const full = tally(filtered.filter((r) => r.year !== meta?.partialYear), (r) => r.year);
+    if (full.length > 1) {
+      const peak = full[0];
+      out.push({ k: 'Peak year', text: `${peak.name} had the most incidents in this view: ${fmt(peak.total)}.` });
+    }
+    const act = tally(filtered, (r) => r.activity).filter((a) => a.total >= 20).sort((a, b) => b.rate - a.rate);
+    if (act.length >= 2) {
+      const hi = act[0], lo = act[act.length - 1];
+      out.push({ k: 'Riskiest activity', text: `${hi.name} incidents became significant ${pct(hi.rate)} of the time, vs ${pct(lo.rate)} during ${lo.name.toLowerCase()}.` });
+    }
+    const causes = tally(filtered, (r) => r.what, true).filter((w) => !/^(To be determined|Other Causes)$/.test(w.name));
+    if (causes.length) {
+      out.push({ k: 'Most common cause', text: `${causes[0].name} was involved in ${pct(causes[0].total / filtered.length)} of incidents.` });
+    }
+    return out;
+  }, [filtered, meta]);
+
+  /* exposed for automated checks */
+  useEffect(() => {
+    window.__DASH__ = { kpi, view, count: filtered.length };
+  }, [kpi, view, filtered]);
+
+  const chips = useMemo(() => {
+    const c = [];
+    if (filters.yearFrom || filters.yearTo) {
+      const from = filters.yearFrom || meta?.minYear;
+      const to = filters.yearTo || meta?.maxYear;
+      c.push({ key: 'years', label: 'Years', value: from === to ? `${from}` : `${from}–${to}`, clear: ['yearFrom', 'yearTo'] });
+    }
+    for (const k of Object.keys(FILTER_LABELS)) {
+      if (filters[k]) c.push({ key: k, label: FILTER_LABELS[k], value: k === 'severity' ? SEVERITY_LABELS[filters[k]] : filters[k], clear: [k] });
+    }
+    return c;
+  }, [filters, meta]);
+
+  const onYear = useCallback((y) => {
+    setFilters((f) => (f.yearFrom === y && f.yearTo === y ? { ...f, yearFrom: '', yearTo: '' } : { ...f, yearFrom: y, yearTo: y }));
+  }, []);
+
+  const copyLink = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch { /* clipboard blocked */ }
+  }, []);
+
+  if (status === 'loading') return <div className="state">Loading incident data…</div>;
+  if (status === 'error') return <div className="state">The data file could not be loaded. Please refresh the page.</div>;
+
+  const labelW = compact ? 118 : 196;
+  const chars = compact ? 17 : 30;
+
   return (
-    <div className="custom-tooltip">
-      <div className="tooltip-label">{label}</div>
-      {payload.map((entry, i) => (
-        <div className="tooltip-item" key={i}>
-          <span className="tooltip-dot" style={{ background: entry.color || entry.fill }} />
-          <span>{entry.name || entry.dataKey}</span>
-          <span className="tooltip-value">{typeof entry.value === 'number' ? entry.value.toLocaleString() : entry.value}</span>
+    <div className="app">
+      <header className="top">
+        <div className="top-inner">
+          <div>
+            <h1>Canadian Pipeline Incidents</h1>
+            <p className="top-sub">
+              Incidents on CER-regulated pipelines and facilities, {meta.minYear} to {dateFmt.format(meta.maxDate)}
+            </p>
+          </div>
+          <div className="top-actions">
+            <a className="btn btn-ghost" href={REPO_URL} target="_blank" rel="noreferrer">Risk model &amp; code</a>
+            <button
+              type="button" className="btn btn-ghost" onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            >
+              {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+            </button>
+          </div>
         </div>
-      ))}
+      </header>
+
+      {/* ── filters: one row that scopes everything below ── */}
+      <div className="filters-wrap">
+        <div className="filters-inner">
+          {compact && (
+            <button type="button" className="btn filters-toggle" onClick={() => setFiltersOpen((o) => !o)} aria-expanded={filtersOpen}>
+              Filters{chips.length ? ` (${chips.length})` : ''} <span aria-hidden="true">{filtersOpen ? '▴' : '▾'}</span>
+            </button>
+          )}
+          {(!compact || filtersOpen) && (
+            <div className="filters">
+              <label className="f f-years">
+                <span>Years</span>
+                <div className="f-pair">
+                  <select value={filters.yearFrom} onChange={(e) => setFilter('yearFrom', e.target.value)} aria-label="From year">
+                    <option value="">{meta.minYear}</option>
+                    {meta.years.map((y) => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                  <span className="f-dash">to</span>
+                  <select value={filters.yearTo} onChange={(e) => setFilter('yearTo', e.target.value)} aria-label="To year">
+                    <option value="">{meta.maxYear}</option>
+                    {meta.years.map((y) => <option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+              </label>
+              <Select label="Province" value={filters.province} onChange={(v) => setFilter('province', v)} options={options.province} all="All provinces" />
+              <Select label="Incident type" value={filters.type} onChange={(v) => setFilter('type', v)} options={options.type} all="All types" />
+              <Select label="Operator" value={filters.operator} onChange={(v) => setFilter('operator', v)} options={options.operator} all="All operators" />
+              <Select label="Cause" value={filters.what} onChange={(v) => setFilter('what', v)} options={options.what} all="All causes" />
+              <Select label="Activity" value={filters.activity} onChange={(v) => setFilter('activity', v)} options={options.activity} all="All activities" />
+              <label className="f">
+                <span>Severity</span>
+                <select value={filters.severity} onChange={(e) => setFilter('severity', e.target.value)}>
+                  <option value="">All incidents</option>
+                  <option value="sig">Significant only</option>
+                  <option value="not">Not significant</option>
+                </select>
+              </label>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <main className="main">
+        <div className="status-row">
+          <p className="count" aria-live="polite">
+            Showing <strong>{fmt(filtered.length)}</strong> of {fmt(records.length)} incidents
+          </p>
+          <div className="chips">
+            {chips.map((c) => (
+              <button
+                key={c.key} type="button" className="chip"
+                onClick={() => setFilters((f) => ({ ...f, ...Object.fromEntries(c.clear.map((k) => [k, ''])) }))}
+                aria-label={`Remove filter ${c.label}: ${c.value}`}
+              >
+                <span className="chip-label">{c.label}:</span> {c.value} <span aria-hidden="true">✕</span>
+              </button>
+            ))}
+            {chips.length > 0 && <button type="button" className="btn btn-link" onClick={clearAll}>Clear all</button>}
+            {chips.length > 0 && <button type="button" className="btn btn-link" onClick={copyLink}>{copied ? 'Link copied' : 'Copy link to this view'}</button>}
+          </div>
+        </div>
+        {!compact && chips.length === 0 && (
+          <p className="hint">Tip: click any bar to filter the whole dashboard. Click it again to clear.</p>
+        )}
+
+        {filtered.length === 0 ? (
+          <div className="card empty">
+            <p>No incidents match these filters.</p>
+            <button type="button" className="btn" onClick={clearAll}>Clear all filters</button>
+          </div>
+        ) : (
+          <>
+            <section className="kpis" aria-label="Key figures">
+              <Kpi label="Incidents" value={fmt(kpi.total)} sub={chips.length ? 'In this view' : `${meta.minYear} to ${meta.maxYear}`} />
+              <Kpi label="Significant" value={fmt(kpi.sig)} sub={`${pct(kpi.rate)} of incidents`} />
+              <Kpi label="Fatalities" value={fmt(kpi.fatalities)} sub="People killed" />
+              <Kpi label="Injuries" value={fmt(kpi.injuries)} sub="People injured" />
+              <Kpi label="Still open" value={fmt(kpi.open)} sub="Not yet closed by the CER" />
+            </section>
+
+            {insights.length > 0 && (
+              <section className="insights" aria-label="Key findings">
+                {insights.map((i) => (
+                  <div className="insight" key={i.k}>
+                    <div className="insight-k">{i.k}</div>
+                    <p>{i.text}</p>
+                  </div>
+                ))}
+              </section>
+            )}
+
+            <Card
+              title="Incidents per year"
+              subtitle="Click a year to focus on it"
+              note={meta.partialYear ? `*${meta.partialYear} covers January to ${dateFmt.format(meta.maxDate)} only, so it is not comparable with full years.` : null}
+            >
+              <YearColumns
+                data={view.years} partialYear={meta.partialYear} colors={colors} compact={compact}
+                range={{ from: filters.yearFrom, to: filters.yearTo }} onSelect={onYear}
+              />
+            </Card>
+
+            <div className="grid-2">
+              <Card title="What kind of incident" subtitle="Incidents can have more than one type">
+                <StackedBars data={view.type} selected={filters.type} onSelect={toggle('type')} colors={colors} labelWidth={labelW} maxChars={chars} />
+              </Card>
+              <Card title="How often incidents became significant" subtitle="By activity at the time of the incident" legend={false}>
+                <RateBars data={view.activity} overall={view.activityBase} selected={filters.activity} onSelect={toggle('activity')} colors={colors} labelWidth={compact ? 90 : 110} />
+              </Card>
+            </div>
+
+            <div className="grid-2">
+              <Card title="Where" subtitle="Incidents by province or territory">
+                <StackedBars data={view.province} selected={filters.province} onSelect={toggle('province')} colors={colors} labelWidth={labelW} maxChars={chars} />
+              </Card>
+              <Card
+                title="Operators with the most incidents"
+                subtitle="Top 10 operators"
+                note="Larger networks report more incidents, so this is not a safety ranking."
+              >
+                <StackedBars data={view.operator} selected={filters.operator} onSelect={toggle('operator')} colors={colors} labelWidth={labelW} maxChars={chars} />
+              </Card>
+            </div>
+
+            <div className="grid-2">
+              <Card title="What happened" subtitle="Immediate cause; an incident can list several">
+                <StackedBars data={view.what} selected={filters.what} onSelect={toggle('what')} colors={colors} labelWidth={labelW} maxChars={chars} />
+              </Card>
+              <Card title="Why it happened" subtitle="Underlying factors; an incident can list several">
+                <StackedBars data={view.why} selected={filters.why} onSelect={toggle('why')} colors={colors} labelWidth={labelW} maxChars={chars} />
+              </Card>
+            </div>
+
+            <div className="grid-2">
+              <Card title="Substance released" subtitle="Top 8, for incidents that involved a substance">
+                {view.substance.length
+                  ? <StackedBars data={view.substance} selected={filters.substance} onSelect={toggle('substance')} colors={colors} labelWidth={labelW} maxChars={chars} />
+                  : <p className="card-empty">No substance recorded for these incidents.</p>}
+              </Card>
+              <Card
+                title="Land use at the incident site"
+                subtitle={`Recorded for ${fmt(view.landKnown)} of ${fmt(view.landBase)} incidents`}
+                note="Most older records were migrated without a land use value, so they are left out."
+              >
+                {view.landUse.length
+                  ? <StackedBars data={view.landUse} selected={filters.landUse} onSelect={toggle('landUse')} colors={colors} labelWidth={labelW} maxChars={chars} />
+                  : <p className="card-empty">No land use recorded for these incidents.</p>}
+              </Card>
+            </div>
+
+            <IncidentTable rows={filtered} compact={compact} />
+          </>
+        )}
+
+        <footer className="about">
+          <div>
+            <h2>About the data</h2>
+            <p>
+              Source: Canada Energy Regulator,{' '}
+              <a href={DATA_URL} target="_blank" rel="noreferrer">Incidents at CER-Regulated Pipelines and Facilities</a>{' '}
+              (Open Government Licence – Canada). Records reported up to {dateFmt.format(meta.maxDate)}.
+            </p>
+            <p>
+              <strong>Significant</strong> is the CER&apos;s own classification, covering incidents such as a death, a serious injury,
+              a fire or explosion, a rupture or a large release.
+            </p>
+          </div>
+          <div>
+            <h2>How to read it</h2>
+            <p>
+              One incident can have several types and causes, so those charts can add up to more than the incident count.
+              Operators listed under more than one legal name (for example NGTL and NOVA Gas Transmission) are combined.
+            </p>
+            <p>
+              Built by Kashif Shafi ·{' '}
+              <a href="https://github.com/kashifshafi99" target="_blank" rel="noreferrer">GitHub</a> ·{' '}
+              <a href="https://www.linkedin.com/in/kashif-shafi" target="_blank" rel="noreferrer">LinkedIn</a>
+            </p>
+          </div>
+        </footer>
+      </main>
     </div>
   );
 }
 
-/* ─── Pie Custom Label ─────────────────────────────────────── */
-const renderCustomPieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent }) => {
-  if (percent < 0.04) return null;
-  const RADIAN = Math.PI / 180;
-  const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-  const x = cx + radius * Math.cos(-midAngle * RADIAN);
-  const y = cy + radius * Math.sin(-midAngle * RADIAN);
+function Select({ label, value, onChange, options, all }) {
   return (
-    <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central" fontSize={11} fontWeight={600}>
-      {`${(percent * 100).toFixed(0)}%`}
-    </text>
+    <label className="f">
+      <span>{label}</span>
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{all}</option>
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
   );
-};
+}
 
-/* ─── Treemap Custom Content ───────────────────────────────── */
-const TreemapContent = ({ root, depth, x, y, width, height, index, name, value }) => {
-  if (width < 40 || height < 30) return null;
+function Kpi({ label, value, sub }) {
   return (
-    <g>
-      <rect x={x} y={y} width={width} height={height} rx={4}
-        style={{ fill: COLORS[index % COLORS.length], stroke: '#0a0e1a', strokeWidth: 2, opacity: 0.85 }} />
-      {width > 60 && height > 40 && (
-        <>
-          <text x={x + width / 2} y={y + height / 2 - 7} textAnchor="middle" fill="#fff" fontSize={11} fontWeight={600}>
-            {name?.length > 15 ? name.slice(0, 14) + '…' : name}
-          </text>
-          <text x={x + width / 2} y={y + height / 2 + 10} textAnchor="middle" fill="rgba(255,255,255,0.7)" fontSize={10}>
-            {value}
-          </text>
-        </>
-      )}
-    </g>
-  );
-};
-
-/* ═══════════════════════════════════════════════════════════════
-   APP COMPONENT
-   ═══════════════════════════════════════════════════════════════ */
-export default function App() {
-  const [rawData, setRawData] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  /* Filters */
-  const [filters, setFilters] = useState({
-    yearFrom: '',
-    yearTo: '',
-    province: '',
-    incidentType: '',
-    company: '',
-    significant: '',
-    substance: '',
-    status: '',
-  });
-
-  /* Table pagination */
-  const [tablePage, setTablePage] = useState(1);
-  const TABLE_PAGE_SIZE = 12;
-
-  /* ─── Load CSV ─────────────────────────────────────────── */
-  useEffect(() => {
-    fetch(`${import.meta.env.BASE_URL}pipeline-incidents-comprehensive-data.csv`)
-      .then(res => res.text())
-      .then(csvText => {
-        const result = Papa.parse(csvText, { header: true, skipEmptyLines: true });
-        setRawData(result.data);
-        setLoading(false);
-      })
-      .catch(err => {
-        console.error('Error loading CSV:', err);
-        setLoading(false);
-      });
-  }, []);
-
-  /* ─── Extract filter options ───────────────────────────── */
-  const filterOptions = useMemo(() => {
-    const years = [...new Set(rawData.map(d => d.Year).filter(Boolean))].sort();
-    const provinces = [...new Set(rawData.map(d => d.Province).filter(Boolean))].sort();
-    const types = [...new Set(rawData.map(d => getPrimaryIncidentType(d['Incident Types'])).filter(Boolean))].sort();
-    const companies = [...new Set(rawData.map(d => d.Company).filter(Boolean))].sort();
-    const substances = [...new Set(rawData.map(d => d.Substance).filter(Boolean))].sort();
-    return { years, provinces, types, companies, substances };
-  }, [rawData]);
-
-  /* ─── Filtered data ────────────────────────────────────── */
-  const filteredData = useMemo(() => {
-    return rawData.filter(d => {
-      if (filters.yearFrom && Number(d.Year) < Number(filters.yearFrom)) return false;
-      if (filters.yearTo && Number(d.Year) > Number(filters.yearTo)) return false;
-      if (filters.province && d.Province !== filters.province) return false;
-      if (filters.incidentType && getPrimaryIncidentType(d['Incident Types']) !== filters.incidentType) return false;
-      if (filters.company && d.Company !== filters.company) return false;
-      if (filters.significant && d.Significant !== filters.significant) return false;
-      if (filters.substance && d.Substance !== filters.substance) return false;
-      if (filters.status && d.Status !== filters.status) return false;
-      return true;
-    });
-  }, [rawData, filters]);
-
-  /* ─── KPI Calculations ─────────────────────────────────── */
-  const kpis = useMemo(() => {
-    const total = filteredData.length;
-    const significant = filteredData.filter(d => d.Significant === 'Yes').length;
-    const fatalities = filteredData.reduce((sum, d) => {
-      const n = parseInt(d['Number of fatalities']);
-      return sum + (isNaN(n) ? 0 : n);
-    }, 0);
-    const injuries = filteredData.reduce((sum, d) => {
-      const n = parseInt(d['Number of individuals injured']);
-      return sum + (isNaN(n) ? 0 : n);
-    }, 0);
-    const releases = filteredData.filter(d => d['Incident Types']?.includes('Release')).length;
-    return { total, significant, fatalities, injuries, releases };
-  }, [filteredData]);
-
-  /* ─── Chart Data: Incidents by Year ────────────────────── */
-  const yearlyData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      const y = d.Year;
-      if (!y) return;
-      counts[y] = (counts[y] || 0) + 1;
-    });
-    return Object.entries(counts)
-      .map(([year, count]) => ({ year, count }))
-      .sort((a, b) => a.year - b.year);
-  }, [filteredData]);
-
-  /* ─── Chart Data: By Province ──────────────────────────── */
-  const provinceData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      if (d.Province) counts[d.Province] = (counts[d.Province] || 0) + 1;
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value, fill: PROVINCE_COLORS[name] || '#6366f1' }))
-      .sort((a, b) => b.value - a.value);
-  }, [filteredData]);
-
-  /* ─── Chart Data: By Incident Type ─────────────────────── */
-  const typeData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      const t = getPrimaryIncidentType(d['Incident Types']);
-      counts[t] = (counts[t] || 0) + 1;
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({
-        name: INCIDENT_TYPE_MAP[name]?.shortName || name,
-        fullName: name,
-        value,
-        fill: INCIDENT_TYPE_MAP[name]?.color || '#6366f1',
-      }))
-      .sort((a, b) => b.value - a.value);
-  }, [filteredData]);
-
-  /* ─── Chart Data: Yearly Trend by Type (Stacked Area) ──── */
-  const yearlyTrendData = useMemo(() => {
-    const yearMap = {};
-    filteredData.forEach(d => {
-      const y = d.Year;
-      if (!y) return;
-      if (!yearMap[y]) yearMap[y] = {};
-      const t = getPrimaryIncidentType(d['Incident Types']);
-      const short = INCIDENT_TYPE_MAP[t]?.shortName || t;
-      yearMap[y][short] = (yearMap[y][short] || 0) + 1;
-    });
-    return Object.entries(yearMap)
-      .map(([year, types]) => ({ year, ...types }))
-      .sort((a, b) => a.year - b.year);
-  }, [filteredData]);
-
-  const trendTypeKeys = useMemo(() => {
-    const keys = new Set();
-    yearlyTrendData.forEach(d => {
-      Object.keys(d).forEach(k => { if (k !== 'year') keys.add(k); });
-    });
-    return [...keys];
-  }, [yearlyTrendData]);
-
-  /* ─── Chart Data: What Happened Category ───────────────── */
-  const whatHappenedData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      const cat = d['What happened category'];
-      if (cat) {
-        const primary = cat.split(',')[0].trim();
-        counts[primary] = (counts[primary] || 0) + 1;
-      }
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 8);
-  }, [filteredData]);
-
-  /* ─── Chart Data: Why It Happened Category ─────────────── */
-  const whyHappenedData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      const cat = d['Why it happened category'];
-      if (cat) {
-        const primary = cat.split(',')[0].trim();
-        counts[primary] = (counts[primary] || 0) + 1;
-      }
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 8);
-  }, [filteredData]);
-
-  /* ─── Chart Data: Top Companies ────────────────────────── */
-  const companyData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      if (d.Company) {
-        const short = d.Company.length > 30 ? d.Company.slice(0, 28) + '…' : d.Company;
-        counts[short] = (counts[short] || 0) + 1;
-      }
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 10);
-  }, [filteredData]);
-
-  /* ─── Chart Data: Substance ────────────────────────────── */
-  const substanceData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      if (d.Substance && d.Substance !== 'Not Applicable') {
-        counts[d.Substance] = (counts[d.Substance] || 0) + 1;
-      }
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 10);
-  }, [filteredData]);
-
-  /* ─── Chart Data: Land Use Treemap ─────────────────────── */
-  const landUseData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      const lu = d['Land Use'];
-      if (lu && !lu.includes('Unknown')) {
-        counts[lu] = (counts[lu] || 0) + 1;
-      }
-    });
-    return Object.entries(counts)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 12);
-  }, [filteredData]);
-
-  /* ─── Chart Data: Significant vs Not ───────────────────── */
-  const significantData = useMemo(() => {
-    const yes = filteredData.filter(d => d.Significant === 'Yes').length;
-    const no = filteredData.filter(d => d.Significant === 'No').length;
-    return [
-      { name: 'Significant', value: yes, fill: '#ef4444' },
-      { name: 'Non-Significant', value: no, fill: '#4f7df5' },
-    ];
-  }, [filteredData]);
-
-  /* ─── Chart Data: Pipeline Type ────────────────────────── */
-  const pipelineTypeData = useMemo(() => {
-    const counts = {};
-    filteredData.forEach(d => {
-      const pt = d['Pipeline or Facility Type'];
-      if (pt) counts[pt] = (counts[pt] || 0) + 1;
-    });
-    return Object.entries(counts)
-      .filter(([name]) => name.trim() !== '')
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value);
-  }, [filteredData]);
-
-  /* ─── Table Data ───────────────────────────────────────── */
-  const tableData = useMemo(() => {
-    const start = (tablePage - 1) * TABLE_PAGE_SIZE;
-    return filteredData.slice(start, start + TABLE_PAGE_SIZE);
-  }, [filteredData, tablePage]);
-
-  const totalPages = Math.ceil(filteredData.length / TABLE_PAGE_SIZE);
-
-  /* ─── Filter Handlers ──────────────────────────────────── */
-  const updateFilter = useCallback((key, value) => {
-    setFilters(prev => ({ ...prev, [key]: value }));
-    setTablePage(1);
-  }, []);
-
-  const resetFilters = useCallback(() => {
-    setFilters({ yearFrom: '', yearTo: '', province: '', incidentType: '', company: '', significant: '', substance: '', status: '' });
-    setTablePage(1);
-  }, []);
-
-  /* ─── Loading ──────────────────────────────────────────── */
-  if (loading) {
-    return (
-      <div className="loading-container">
-        <div className="loading-spinner" />
-        <div className="loading-text">Loading pipeline incident data…</div>
-      </div>
-    );
-  }
-
-  /* ═══════════════════════════════════════════════════════════
-     RENDER
-     ═══════════════════════════════════════════════════════════ */
-  return (
-    <div className="dashboard">
-      {/* ───── Header ───── */}
-      <header className="dashboard-header">
-        <div className="header-left">
-          <div className="header-logo">⚡</div>
-          <div className="header-title">
-            <h1>Pipeline Incidents Dashboard</h1>
-            <p>Canada Energy Regulator — Comprehensive Incident Analytics</p>
-          </div>
-        </div>
-        <div className="header-right">
-          <span className="header-badge badge-live">● CER Open Data</span>
-          <span className="header-badge badge-count">{filteredData.length.toLocaleString()} Records</span>
-        </div>
-      </header>
-
-      <main className="dashboard-content">
-        {/* ───── KPI Row ───── */}
-        <section className="kpi-row">
-          <div className="kpi-card">
-            <div className="kpi-icon">📊</div>
-            <div className="kpi-label">Total Incidents</div>
-            <div className="kpi-value">{formatNumber(kpis.total)}</div>
-            <div className="kpi-sub">Across all filtered records</div>
-          </div>
-          <div className="kpi-card">
-            <div className="kpi-icon">⚠️</div>
-            <div className="kpi-label">Significant</div>
-            <div className="kpi-value">{formatNumber(kpis.significant)}</div>
-            <div className="kpi-sub">
-              <span className="kpi-trend-up">{kpis.total ? ((kpis.significant / kpis.total) * 100).toFixed(1) : 0}%</span>
-              of total incidents
-            </div>
-          </div>
-          <div className="kpi-card">
-            <div className="kpi-icon">💀</div>
-            <div className="kpi-label">Fatalities</div>
-            <div className="kpi-value">{kpis.fatalities}</div>
-            <div className="kpi-sub">Reported fatalities</div>
-          </div>
-          <div className="kpi-card">
-            <div className="kpi-icon">🏥</div>
-            <div className="kpi-label">Injuries</div>
-            <div className="kpi-value">{formatNumber(kpis.injuries)}</div>
-            <div className="kpi-sub">Individuals injured</div>
-          </div>
-          <div className="kpi-card">
-            <div className="kpi-icon">🛢️</div>
-            <div className="kpi-label">Substance Releases</div>
-            <div className="kpi-value">{formatNumber(kpis.releases)}</div>
-            <div className="kpi-sub">Release incidents</div>
-          </div>
-        </section>
-
-        {/* ───── Filter Bar ───── */}
-        <section className="filter-bar">
-          <div className="filter-group">
-            <label className="filter-label">Year From</label>
-            <select className="filter-select" value={filters.yearFrom}
-              onChange={e => updateFilter('yearFrom', e.target.value)}>
-              <option value="">All Years</option>
-              {filterOptions.years.map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </div>
-          <div className="filter-group">
-            <label className="filter-label">Year To</label>
-            <select className="filter-select" value={filters.yearTo}
-              onChange={e => updateFilter('yearTo', e.target.value)}>
-              <option value="">All Years</option>
-              {filterOptions.years.map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </div>
-          <div className="filter-group">
-            <label className="filter-label">Province</label>
-            <select className="filter-select" value={filters.province}
-              onChange={e => updateFilter('province', e.target.value)}>
-              <option value="">All Provinces</option>
-              {filterOptions.provinces.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
-          </div>
-          <div className="filter-group">
-            <label className="filter-label">Incident Type</label>
-            <select className="filter-select" value={filters.incidentType}
-              onChange={e => updateFilter('incidentType', e.target.value)}>
-              <option value="">All Types</option>
-              {filterOptions.types.map(t => <option key={t} value={t}>{INCIDENT_TYPE_MAP[t]?.shortName || t}</option>)}
-            </select>
-          </div>
-          <div className="filter-group">
-            <label className="filter-label">Company</label>
-            <select className="filter-select" value={filters.company}
-              onChange={e => updateFilter('company', e.target.value)}>
-              <option value="">All Companies</option>
-              {filterOptions.companies.map(c => <option key={c} value={c}>{c.length > 40 ? c.slice(0, 38) + '…' : c}</option>)}
-            </select>
-          </div>
-          <div className="filter-group">
-            <label className="filter-label">Significant</label>
-            <select className="filter-select" value={filters.significant}
-              onChange={e => updateFilter('significant', e.target.value)}>
-              <option value="">All</option>
-              <option value="Yes">Yes</option>
-              <option value="No">No</option>
-            </select>
-          </div>
-          <div className="filter-group">
-            <label className="filter-label">Substance</label>
-            <select className="filter-select" value={filters.substance}
-              onChange={e => updateFilter('substance', e.target.value)}>
-              <option value="">All Substances</option>
-              {filterOptions.substances.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
-          <button className="filter-reset-btn" onClick={resetFilters}>✕ Reset</button>
-        </section>
-
-        {/* ═══════ CHART ROWS ═══════ */}
-
-        {/* Row 1: Yearly Trend (full width) */}
-        <div className="charts-row" style={{ gridTemplateColumns: '1fr' }}>
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Incidents Over Time — Stacked Area</div>
-                <div className="chart-subtitle">Yearly breakdown by incident type</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 340 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={yearlyTrendData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                  <defs>
-                    {trendTypeKeys.map((key, i) => (
-                      <linearGradient key={key} id={`grad-${i}`} x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={COLORS[i % COLORS.length]} stopOpacity={0.35} />
-                        <stop offset="95%" stopColor={COLORS[i % COLORS.length]} stopOpacity={0.02} />
-                      </linearGradient>
-                    ))}
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(99,115,171,0.08)" />
-                  <XAxis dataKey="year" tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <YAxis tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend />
-                  {trendTypeKeys.map((key, i) => (
-                    <Area key={key} type="monotone" dataKey={key} stackId="1"
-                      stroke={COLORS[i % COLORS.length]}
-                      fill={`url(#grad-${i})`}
-                      strokeWidth={2} />
-                  ))}
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-
-        {/* Row 2: Incidents by Year (bar) + Incident Type (donut) + Significant (donut) */}
-        <div className="charts-row charts-row-3">
-          {/* Bar: Incidents by Year */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Incidents by Year</div>
-                <div className="chart-subtitle">Annual incident count</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={yearlyData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#4f7df5" stopOpacity={1} />
-                      <stop offset="100%" stopColor="#8b5cf6" stopOpacity={0.8} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(99,115,171,0.08)" />
-                  <XAxis dataKey="year" tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <YAxis tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Bar dataKey="count" name="Incidents" fill="url(#barGrad)" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Donut: Incident Types */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Incident Types Distribution</div>
-                <div className="chart-subtitle">Primary incident category breakdown</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={typeData} cx="50%" cy="50%" innerRadius={55} outerRadius={105}
-                    paddingAngle={2} dataKey="value" labelLine={false} label={renderCustomPieLabel}>
-                    {typeData.map((entry, i) => (
-                      <Cell key={i} fill={entry.fill} />
-                    ))}
-                  </Pie>
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend formatter={(value) => <span style={{ color: '#8b95b0', fontSize: 11 }}>{value}</span>} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Donut: Significant */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Significant vs Non-Significant</div>
-                <div className="chart-subtitle">Severity classification</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={significantData} cx="50%" cy="50%" innerRadius={55} outerRadius={105}
-                    paddingAngle={3} dataKey="value" labelLine={false} label={renderCustomPieLabel}>
-                    {significantData.map((entry, i) => (
-                      <Cell key={i} fill={entry.fill} />
-                    ))}
-                  </Pie>
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend formatter={(value) => <span style={{ color: '#8b95b0', fontSize: 11 }}>{value}</span>} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-
-        {/* Row 3: Province (horizontal bar) + Top Companies (horizontal bar) */}
-        <div className="charts-row charts-row-2">
-          {/* Province */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Incidents by Province</div>
-                <div className="chart-subtitle">Geographic distribution across Canada</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 360 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={provinceData} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(99,115,171,0.08)" />
-                  <XAxis type="number" tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <YAxis dataKey="name" type="category" width={120} tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Bar dataKey="value" name="Incidents" radius={[0, 4, 4, 0]}>
-                    {provinceData.map((entry, i) => (
-                      <Cell key={i} fill={entry.fill} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Top Companies */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Top 10 Companies by Incidents</div>
-                <div className="chart-subtitle">Highest incident reporters</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 360 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={companyData} layout="vertical" margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(99,115,171,0.08)" />
-                  <XAxis type="number" tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <YAxis dataKey="name" type="category" width={160} tick={{ fill: '#8b95b0', fontSize: 10 }} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Bar dataKey="value" name="Incidents" radius={[0, 4, 4, 0]}>
-                    {companyData.map((_, i) => (
-                      <Cell key={i} fill={COLORS[i % COLORS.length]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-
-        {/* Row 4: What Happened + Why It Happened + Substance */}
-        <div className="charts-row charts-row-3">
-          {/* What Happened */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">What Happened — Root Cause</div>
-                <div className="chart-subtitle">Primary cause categories</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={whatHappenedData} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(99,115,171,0.08)" />
-                  <XAxis type="number" tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <YAxis dataKey="name" type="category" width={130} tick={{ fill: '#8b95b0', fontSize: 10 }} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Bar dataKey="value" name="Incidents" radius={[0, 4, 4, 0]}>
-                    {whatHappenedData.map((_, i) => (
-                      <Cell key={i} fill={COLORS[i % COLORS.length]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Why It Happened */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Why It Happened</div>
-                <div className="chart-subtitle">Contributing factor categories</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={whyHappenedData} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(99,115,171,0.08)" />
-                  <XAxis type="number" tick={{ fill: '#8b95b0', fontSize: 11 }} />
-                  <YAxis dataKey="name" type="category" width={130} tick={{ fill: '#8b95b0', fontSize: 10 }} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Bar dataKey="value" name="Incidents" radius={[0, 4, 4, 0]}>
-                    {whyHappenedData.map((_, i) => (
-                      <Cell key={i} fill={COLORS[(i + 5) % COLORS.length]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Substance Pie */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Released Substances</div>
-                <div className="chart-subtitle">Top substances involved (excl. N/A)</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={substanceData} cx="50%" cy="50%" innerRadius={45} outerRadius={95}
-                    paddingAngle={2} dataKey="value" labelLine={false} label={renderCustomPieLabel}>
-                    {substanceData.map((_, i) => (
-                      <Cell key={i} fill={COLORS[i % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend formatter={(value) => <span style={{ color: '#8b95b0', fontSize: 10 }}>{value.length > 20 ? value.slice(0, 18) + '…' : value}</span>} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-
-        {/* Row 5: Pipeline Type + Land Use Treemap */}
-        <div className="charts-row charts-row-2">
-          {/* Pipeline Type */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Pipeline / Facility Type</div>
-                <div className="chart-subtitle">Infrastructure classification</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={pipelineTypeData} cx="50%" cy="50%" innerRadius={50} outerRadius={100}
-                    paddingAngle={3} dataKey="value" labelLine={false} label={renderCustomPieLabel}>
-                    {pipelineTypeData.map((_, i) => (
-                      <Cell key={i} fill={COLORS[(i + 2) % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip content={<CustomTooltip />} />
-                  <Legend formatter={(value) => <span style={{ color: '#8b95b0', fontSize: 11 }}>{value || 'Unknown'}</span>} />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Land Use Treemap */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Land Use Distribution</div>
-                <div className="chart-subtitle">Incident locations by land classification</div>
-              </div>
-            </div>
-            <div className="chart-body" style={{ height: 300 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <Treemap data={landUseData} dataKey="value" nameKey="name"
-                  content={<TreemapContent />} animationDuration={300}>
-                </Treemap>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-
-        {/* ═══════ DATA TABLE ═══════ */}
-        <div className="chart-card">
-          <div className="chart-header">
-            <div>
-              <div className="chart-title">Incident Records</div>
-              <div className="chart-subtitle">Showing {((tablePage - 1) * TABLE_PAGE_SIZE) + 1}–{Math.min(tablePage * TABLE_PAGE_SIZE, filteredData.length)} of {filteredData.length.toLocaleString()} records</div>
-            </div>
-          </div>
-          <div className="table-wrapper" style={{ maxHeight: 480, overflowY: 'auto' }}>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Incident #</th>
-                  <th>Type</th>
-                  <th>Date</th>
-                  <th>Province</th>
-                  <th>Company</th>
-                  <th>Substance</th>
-                  <th>Status</th>
-                  <th>Significant</th>
-                  <th>Location</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tableData.map((row, i) => (
-                  <tr key={i}>
-                    <td style={{ fontWeight: 600, color: '#7c8fff' }}>{row['Incident Number']}</td>
-                    <td>
-                      <span className={`type-badge ${getTypeBadgeClass(row['Incident Types'] || '')}`}>
-                        {INCIDENT_TYPE_MAP[getPrimaryIncidentType(row['Incident Types'])]?.shortName || 'Other'}
-                      </span>
-                    </td>
-                    <td>{row['Reported Date']}</td>
-                    <td>{row.Province}</td>
-                    <td title={row.Company}>{row.Company?.length > 28 ? row.Company.slice(0, 26) + '…' : row.Company}</td>
-                    <td>{row.Substance === 'Not Applicable' ? '—' : row.Substance}</td>
-                    <td>
-                      <span className={`status-pill ${row.Status === 'Closed' ? 'status-closed' : 'status-open'}`}>
-                        <span className="status-dot" />
-                        {row.Status}
-                      </span>
-                    </td>
-                    <td style={{ color: row.Significant === 'Yes' ? '#ef4444' : '#8b95b0' }}>
-                      {row.Significant}
-                    </td>
-                    <td>{row['Nearest Populated Centre']}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {/* Pagination */}
-          <div className="pagination">
-            <button className="page-btn" disabled={tablePage <= 1} onClick={() => setTablePage(1)}>⟪</button>
-            <button className="page-btn" disabled={tablePage <= 1} onClick={() => setTablePage(p => p - 1)}>←</button>
-            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              let page;
-              if (totalPages <= 5) {
-                page = i + 1;
-              } else if (tablePage <= 3) {
-                page = i + 1;
-              } else if (tablePage >= totalPages - 2) {
-                page = totalPages - 4 + i;
-              } else {
-                page = tablePage - 2 + i;
-              }
-              return (
-                <button key={page} className={`page-btn ${tablePage === page ? 'active' : ''}`}
-                  onClick={() => setTablePage(page)}>
-                  {page}
-                </button>
-              );
-            })}
-            <span className="page-info">of {totalPages}</span>
-            <button className="page-btn" disabled={tablePage >= totalPages} onClick={() => setTablePage(p => p + 1)}>→</button>
-            <button className="page-btn" disabled={tablePage >= totalPages} onClick={() => setTablePage(totalPages)}>⟫</button>
-          </div>
-        </div>
-      </main>
+    <div className="kpi">
+      <div className="kpi-label">{label}</div>
+      <div className="kpi-value">{value}</div>
+      <div className="kpi-sub">{sub}</div>
     </div>
   );
 }
