@@ -4,6 +4,8 @@ A machine learning model that scores incidents on federally regulated Canadian p
 
 Alberta reports more incidents than any other province (708 of 2,018), so the analysis pays special attention to how the model performs there.
 
+**[▶ Open the live dashboard](https://kashifshafi99.github.io/alberta-pipeline-risk-ml/)**
+
 ## Key results
 
 | | Value |
@@ -20,7 +22,7 @@ On held-out Alberta incidents, the top third of risk scores contained two-thirds
 
 ## Interactive dashboard
 
-The [`dashboard/`](dashboard) folder has a React dashboard for exploring the same data by year, province, operator, cause and incident type.
+A React dashboard for exploring the same data by year, province, operator, cause and incident type. **[Try it live](https://kashifshafi99.github.io/alberta-pipeline-risk-ml/)**, or see the source in [`dashboard/`](dashboard).
 
 ![Dashboard preview](dashboard/preview.png)
 
