@@ -2,6 +2,8 @@
 
 An interactive React dashboard for exploring the Canada Energy Regulator's pipeline incident data: trends over time, incident types, provinces, operators, root causes, contributing factors, released substances, facility types and land use, with filters for year, province, incident type, company, significance and substance.
 
+**[▶ Open the live dashboard](https://kashifshafi99.github.io/alberta-pipeline-risk-ml/)**
+
 ![Dashboard preview](preview.png)
 
 ## Run it locally
