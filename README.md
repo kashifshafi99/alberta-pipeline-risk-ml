@@ -22,7 +22,7 @@ On held-out Alberta incidents, the top third of risk scores contained two-thirds
 
 ## Interactive dashboard
 
-A React dashboard for exploring the same data by year, province, operator, cause and incident type. **[Try it live](https://kashifshafi99.github.io/alberta-pipeline-risk-ml/)**, or see the source in [`dashboard/`](dashboard).
+A React dashboard for exploring the same data by year, province, operator, cause and incident type, with click-to-filter charts, shareable filtered views and CSV export. **[Try it live](https://kashifshafi99.github.io/alberta-pipeline-risk-ml/)**, or see the source in [`dashboard/`](dashboard).
 
 ![Dashboard preview](dashboard/preview.png)
 
