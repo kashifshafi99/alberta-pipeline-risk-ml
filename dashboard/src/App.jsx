@@ -142,7 +142,7 @@ export default function App() {
 
   /* ─── Load CSV ─────────────────────────────────────────── */
   useEffect(() => {
-    fetch('/pipeline-incidents-comprehensive-data.csv')
+    fetch(`${import.meta.env.BASE_URL}pipeline-incidents-comprehensive-data.csv`)
       .then(res => res.text())
       .then(csvText => {
         const result = Papa.parse(csvText, { header: true, skipEmptyLines: true });
