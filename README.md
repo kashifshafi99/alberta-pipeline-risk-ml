@@ -18,6 +18,12 @@ Alberta reports more incidents than any other province (708 of 2,018), so the an
 
 On held-out Alberta incidents, the top third of risk scores contained two-thirds of the significant incidents, so the score could help prioritize follow-up and inspections.
 
+## Interactive dashboard
+
+The [`dashboard/`](dashboard) folder has a React dashboard for exploring the same data by year, province, operator, cause and incident type.
+
+![Dashboard preview](dashboard/preview.png)
+
 ## Data
 
 [Incidents at CER-Regulated Pipelines and Facilities](https://open.canada.ca/data/en/dataset/fd17f08f-f14d-433f-91df-c90a34e1e9a6), Canada Energy Regulator, Open Government Licence – Canada. 2,018 incidents from 2008 to 2026, 102 columns. 17.8% of incidents are significant (14.3% in Alberta).
