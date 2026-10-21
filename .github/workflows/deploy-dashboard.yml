@@ -7,6 +7,7 @@ on:
       - "dashboard/**"
       - ".github/workflows/deploy-dashboard.yml"
   workflow_dispatch:
+  workflow_call:   # used by refresh-data.yml after new data is committed
 
 permissions:
   contents: read
@@ -25,6 +26,8 @@ jobs:
         working-directory: dashboard
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}   # latest commit, including a fresh data refresh
       - uses: actions/setup-node@v4
         with:
           node-version: 22
