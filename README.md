@@ -22,13 +22,13 @@ On held-out Alberta incidents, the top third of risk scores contained two-thirds
 
 ## Interactive dashboard
 
-A React dashboard for exploring the same data by year, province, operator, cause and incident type, with click-to-filter charts, shareable filtered views and CSV export. **[Try it live](https://kashifshafi99.github.io/alberta-pipeline-risk-ml/)**, or see the source in [`dashboard/`](dashboard).
+A React dashboard for exploring the same data by year, province, operator, cause and incident type, with click-to-filter charts, shareable filtered views and CSV export. Its data refreshes automatically every Monday from the CER ([`refresh-data.yml`](.github/workflows/refresh-data.yml)), so its counts can be newer than the model results above, which use the June 26, 2026 release in [`data/`](data). **[Try it live](https://kashifshafi99.github.io/alberta-pipeline-risk-ml/)**, or see the source in [`dashboard/`](dashboard).
 
 ![Dashboard preview](dashboard/preview.png)
 
 ## Data
 
-[Incidents at CER-Regulated Pipelines and Facilities](https://open.canada.ca/data/en/dataset/fd17f08f-f14d-433f-91df-c90a34e1e9a6), Canada Energy Regulator, Open Government Licence – Canada. 2,018 incidents from 2008 to 2026, 102 columns. 17.8% of incidents are significant (14.3% in Alberta).
+[Incidents at CER-Regulated Pipelines and Facilities](https://open.canada.ca/data/en/dataset/fd17f08f-f14d-433f-91df-c90a34e1e9a6), Canada Energy Regulator, Open Government Licence – Canada. The model uses the release of June 26, 2026: 2,018 incidents from 2008 onward, 102 columns. The live dashboard uses the newest release. 17.8% of incidents are significant (14.3% in Alberta).
 
 ![Significance rate by activity and facility type](figures/significance_by_activity_and_type.png)
 
@@ -70,4 +70,4 @@ jupyter notebook pipeline_incident_risk_model.ipynb
 
 ## Tools
 
-Python, pandas, scikit-learn, matplotlib, seaborn, Jupyter
+Python, pandas, scikit-learn, matplotlib, seaborn, Jupyter, React, GitHub Actions
